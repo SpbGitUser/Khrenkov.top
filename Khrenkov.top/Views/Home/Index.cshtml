@@ -1,0 +1,183 @@
+﻿@model List<string>
+@{
+    ViewData["Title"] = "Файлы";
+}
+
+<ul class="nav nav-tabs mb-4" id="fileTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="download-tab" data-bs-toggle="tab" data-bs-target="#download" type="button" role="tab">
+            Скачать
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="upload-tab" data-bs-toggle="tab" data-bs-target="#upload" type="button" role="tab">
+            Загрузить
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content">
+    <div class="tab-pane fade show active" id="download" role="tabpanel">
+        @if (!Model.Any())
+        {
+            <p class="text-muted">Нет загруженных файлов.</p>
+        }
+        else
+        {
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Имя файла</th>
+                        <th style="width:290px"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var file in Model)
+                    {
+                        <tr>
+                            <td class="align-middle">@file</td>
+                            <td class="text-end">
+                                <a href="@Url.Action("Download", "Home", new { fileName = file })" class="btn btn-sm btn-outline-primary me-1">Скачать</a>
+                                <button type="button" class="btn btn-sm btn-outline-success me-1 share-btn" data-file="@file">Выдать ссылку</button>
+                                <form method="post" action="@Url.Action("Delete", "Home")" class="d-inline">
+                                    @Html.AntiForgeryToken()
+                                    <input type="hidden" name="fileName" value="@file" />
+                                    <button type="submit" class="btn btn-sm btn-outline-danger"
+                                            onclick="return confirm('Удалить @file?')">Удалить</button>
+                                </form>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+
+    <div class="tab-pane fade" id="upload" role="tabpanel">
+        <form method="post" action="@Url.Action("Upload", "Home")" enctype="multipart/form-data" style="max-width:480px">
+            @Html.AntiForgeryToken()
+            <div class="mb-3">
+                <label class="form-label">Выберите файл</label>
+                <input type="file" name="file" class="form-control" required />
+            </div>
+            <button type="submit" class="btn btn-primary">Загрузить</button>
+        </form>
+    </div>
+</div>
+
+<div class="mt-4">
+    <form method="post" action="/Auth/Logout">
+        @Html.AntiForgeryToken()
+        <button type="submit" class="btn btn-outline-secondary btn-sm">Выход</button>
+    </form>
+</div>
+
+<!-- Share Modal -->
+<div class="modal fade" id="shareModal" tabindex="-1" aria-labelledby="shareModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="shareModalLabel">Выдать ссылку</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-3 text-truncate">Файл: <strong id="shareFileName"></strong></p>
+                <label class="form-label">Количество скачиваний:</label>
+                <div class="input-group" style="width:150px">
+                    <button class="btn btn-outline-secondary" type="button" id="decrementBtn">−</button>
+                    <input type="number" id="shareCount" class="form-control text-center" value="1" min="1" />
+                    <button class="btn btn-outline-secondary" type="button" id="incrementBtn">+</button>
+                </div>
+                <div id="shareResult" class="mt-3 d-none">
+                    <label class="form-label">Ссылка:</label>
+                    <div class="input-group">
+                        <input type="text" id="shareUrl" class="form-control form-control-sm" readonly />
+                        <button class="btn btn-outline-secondary btn-sm" type="button" id="copyBtn">Копировать</button>
+                    </div>
+                    <div id="copyConfirm" class="text-success small mt-1 d-none">Скопировано!</div>
+                </div>
+                <div id="shareError" class="alert alert-danger mt-3 d-none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                <button type="button" class="btn btn-success" id="generateBtn">Сгенерировать</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    const modal = new bootstrap.Modal(document.getElementById('shareModal'));
+    let currentFile = null;
+
+    document.querySelectorAll('.share-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentFile = btn.dataset.file;
+            document.getElementById('shareFileName').textContent = currentFile;
+            document.getElementById('shareCount').value = 1;
+            document.getElementById('shareResult').classList.add('d-none');
+            document.getElementById('shareError').classList.add('d-none');
+            document.getElementById('copyConfirm').classList.add('d-none');
+            modal.show();
+        });
+    });
+
+    document.getElementById('decrementBtn').addEventListener('click', () => {
+        const el = document.getElementById('shareCount');
+        if (parseInt(el.value) > 1) el.value = parseInt(el.value) - 1;
+    });
+
+    document.getElementById('incrementBtn').addEventListener('click', () => {
+        const el = document.getElementById('shareCount');
+        el.value = parseInt(el.value) + 1;
+    });
+
+    document.getElementById('generateBtn').addEventListener('click', async () => {
+        const count = parseInt(document.getElementById('shareCount').value);
+        if (count < 1) return;
+
+        const xsrfToken = document.querySelector('meta[name="xsrf-token"]').content;
+        document.getElementById('shareError').classList.add('d-none');
+
+        try {
+            const resp = await fetch('/api/files/share', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-XSRF-TOKEN': xsrfToken
+                },
+                body: JSON.stringify({ fileName: currentFile, maxDownloads: count })
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({ error: 'Ошибка сервера' }));
+                const errEl = document.getElementById('shareError');
+                errEl.textContent = err.error ?? 'Ошибка сервера';
+                errEl.classList.remove('d-none');
+                return;
+            }
+
+            const data = await resp.json();
+            const url = `${location.origin}/share/${data.token}`;
+            document.getElementById('shareUrl').value = url;
+            document.getElementById('shareResult').classList.remove('d-none');
+            document.getElementById('copyConfirm').classList.add('d-none');
+        } catch {
+            const errEl = document.getElementById('shareError');
+            errEl.textContent = 'Ошибка соединения с сервером';
+            errEl.classList.remove('d-none');
+        }
+    });
+
+    document.getElementById('copyBtn').addEventListener('click', () => {
+        const url = document.getElementById('shareUrl').value;
+        navigator.clipboard.writeText(url).then(() => {
+            document.getElementById('copyConfirm').classList.remove('d-none');
+        });
+    });
+})();
+</script>
+}
+

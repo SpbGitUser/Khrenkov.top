@@ -1,0 +1,48 @@
+@{
+    ViewData["Title"] = "Вход";
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Khrenkov.top — Вход</title>
+    <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <style>
+        body {
+            background-color: #f8f9fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .login-box {
+            background: #fff;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,.1);
+            width: 100%;
+            max-width: 360px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h4 class="mb-4 text-center">Khrenkov.top</h4>
+        @if (ViewData["Error"] != null)
+        {
+            <div class="alert alert-danger">@ViewData["Error"]</div>
+        }
+        <form method="post" action="/Auth/Login">
+            @Html.AntiForgeryToken()
+            <input type="hidden" name="returnUrl" value="@ViewData["ReturnUrl"]" />
+            <div class="mb-3">
+                <label for="password" class="form-label">Пароль</label>
+                <input type="password" id="password" name="password" class="form-control" autofocus required />
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Войти</button>
+        </form>
+    </div>
+</body>
+</html>

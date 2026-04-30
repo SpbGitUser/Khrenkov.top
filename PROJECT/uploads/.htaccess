@@ -1,0 +1,3 @@
+# Block direct access to uploaded files — served through PHP only
+Options -Indexes
+Deny from all
