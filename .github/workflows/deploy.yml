@@ -1,0 +1,104 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+env:
+  APP_NAME: khrenkov-top
+  BACKEND_PROJECT: backend/Khrenkov.top/Khrenkov.top.csproj
+  FRONTEND_DIR: frontend
+  NODE_VERSION: "22"
+  DOTNET_VERSION: "8.0.x"
+  DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/var/www/khrenkov-top' }}
+  DOMAIN_NAME: ${{ vars.DOMAIN_NAME || '_' }}
+  BACKEND_URLS: ${{ vars.BACKEND_URLS || 'http://127.0.0.1:5000' }}
+  BACKEND_PROXY_URL: ${{ vars.BACKEND_PROXY_URL || 'http://127.0.0.1:5000' }}
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Restore backend
+        run: dotnet restore "${BACKEND_PROJECT}" --runtime linux-x64
+
+      - name: Publish backend
+        run: |
+          dotnet publish "${BACKEND_PROJECT}" \
+            --configuration Release \
+            --runtime linux-x64 \
+            --self-contained true \
+            --no-restore \
+            --output release/backend
+
+      - name: Build frontend
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare release package
+        run: |
+          mkdir -p release/frontend
+          cp -a frontend/dist/khrenkov-top-frontend/browser/. release/frontend/
+          tar -czf release.tar.gz -C release .
+
+      - name: Configure SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          test -n "${VPS_HOST}"
+          test -n "${VPS_SSH_KEY}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${VPS_SSH_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${VPS_PORT}" "${VPS_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Upload release
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          test -n "${VPS_USER}"
+          scp -i ~/.ssh/deploy_key -P "${VPS_PORT}" release.tar.gz "${VPS_USER}@${VPS_HOST}:/tmp/${APP_NAME}-release.tar.gz"
+
+      - name: Deploy on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+        run: |
+          test -n "${SITE_PASSWORD}"
+          SITE_PASSWORD_B64="$(printf '%s' "${SITE_PASSWORD}" | base64 -w 0)"
+          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" \
+            "APP_NAME='${APP_NAME}' DEPLOY_PATH='${DEPLOY_PATH}' DOMAIN_NAME='${DOMAIN_NAME}' BACKEND_URLS='${BACKEND_URLS}' BACKEND_PROXY_URL='${BACKEND_PROXY_URL}' SITE_PASSWORD_B64='${SITE_PASSWORD_B64}' bash -s -- '/tmp/${APP_NAME}-release.tar.gz'" \
+            < .github/deploy/deploy-ubuntu.sh
