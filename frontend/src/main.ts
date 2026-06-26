@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { HttpClient, provideHttpClient } from '@angular/common/http';
+import { HttpClient, HttpResponse, provideHttpClient } from '@angular/common/http';
 import { Component, ElementRef, Injectable, OnInit, ViewChild, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { bootstrapApplication } from '@angular/platform-browser';
@@ -27,12 +27,20 @@ class ApiService {
     return this.http.get<AuthStatus>('/api/auth/status', { withCredentials: true });
   }
 
-  login(password: string): Observable<AuthStatus> {
-    return this.http.post<AuthStatus>('/api/auth/login', { password }, { withCredentials: true });
+  login(password: string): Observable<HttpResponse<string>> {
+    return this.http.post('/api/auth/login', { password }, {
+      withCredentials: true,
+      observe: 'response',
+      responseType: 'text'
+    });
   }
 
-  logout(): Observable<AuthStatus> {
-    return this.http.post<AuthStatus>('/api/auth/logout', {}, { withCredentials: true });
+  logout(): Observable<HttpResponse<string>> {
+    return this.http.post('/api/auth/logout', {}, {
+      withCredentials: true,
+      observe: 'response',
+      responseType: 'text'
+    });
   }
 
   listFiles(): Observable<FileItem[]> {
@@ -202,20 +210,31 @@ class AppComponent implements OnInit {
   deletingFiles = new Set<string>();
 
   private filesRequestId = 0;
+  private authRequestId = 0;
   private activeVisibleFileLoads = 0;
   private activeSilentFileLoads = 0;
 
   ngOnInit(): void {
+    const requestId = this.authRequestId;
+
     this.api.status().pipe(
       timeout({ first: 8000 })
     ).subscribe({
       next: status => {
+        if (requestId !== this.authRequestId) {
+          return;
+        }
+
         this.authenticated = status.authenticated;
         if (status.authenticated) {
           this.loadFiles();
         }
       },
       error: () => {
+        if (requestId !== this.authRequestId) {
+          return;
+        }
+
         this.authenticated = false;
         this.password = '';
         this.resetWorkspaceState();
@@ -231,20 +250,31 @@ class AppComponent implements OnInit {
 
     this.clearFeedback();
     this.loggingIn = true;
+    const requestId = ++this.authRequestId;
     this.api.login(password).pipe(
       timeout({ first: 10000 }),
       finalize(() => {
-        this.loggingIn = false;
+        if (requestId === this.authRequestId) {
+          this.loggingIn = false;
+        }
       })
     ).subscribe({
       next: () => {
-        this.authenticated = true;
-        this.password = '';
-        this.resetWorkspaceState();
-        this.loadFiles();
+        if (requestId !== this.authRequestId) {
+          return;
+        }
+
+        this.enterWorkspace();
       },
       error: () => {
+        if (requestId !== this.authRequestId) {
+          return;
+        }
+
+        this.authenticated = false;
+        this.loggingIn = false;
         this.password = '';
+        this.resetWorkspaceState();
         this.error = 'Не удалось войти. Введите пароль заново';
       }
     });
@@ -257,17 +287,26 @@ class AppComponent implements OnInit {
 
     this.clearFeedback();
     this.loggingOut = true;
+    const requestId = ++this.authRequestId;
+    this.authenticated = false;
+    this.resetWorkspaceState();
+
     this.api.logout().pipe(
+      timeout({ first: 8000 }),
       finalize(() => {
-        this.loggingOut = false;
+        if (requestId === this.authRequestId) {
+          this.loggingOut = false;
+        }
       })
     ).subscribe({
-      next: () => {
-        this.authenticated = false;
-        this.resetWorkspaceState();
-      },
+      next: () => {},
       error: () => {
-        this.error = 'Не удалось выйти';
+        if (requestId !== this.authRequestId) {
+          return;
+        }
+
+        this.loggingOut = false;
+        this.error = 'Сессия сброшена. При необходимости войдите заново';
       }
     });
   }
@@ -446,12 +485,17 @@ class AppComponent implements OnInit {
     ).subscribe({
       next: files => {
         if (requestId === this.filesRequestId) {
+          this.authenticated = true;
+          this.loggingIn = false;
           this.files = this.normalizeFiles(files);
         }
       },
       error: () => {
         if (requestId === this.filesRequestId && options.reportErrors) {
-          this.error = 'Не удалось загрузить список файлов';
+          this.authenticated = false;
+          this.password = '';
+          this.resetWorkspaceState();
+          this.error = 'Не удалось загрузить список файлов. Введите пароль заново';
         }
       }
     });
@@ -470,6 +514,14 @@ class AppComponent implements OnInit {
 
   private normalizeFiles(files: FileItem[]): FileItem[] {
     return [...files].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+  }
+
+  private enterWorkspace(): void {
+    this.authenticated = true;
+    this.loggingIn = false;
+    this.password = '';
+    this.resetWorkspaceState();
+    this.loadFiles();
   }
 
   private setDeleting(fileName: string, active: boolean): void {
