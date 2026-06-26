@@ -17,10 +17,6 @@ env:
   FRONTEND_DIR: frontend
   NODE_VERSION: "22"
   DOTNET_VERSION: "8.0.x"
-  DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/var/www/khrenkov-top' }}
-  DOMAIN_NAME: ${{ vars.DOMAIN_NAME || '_' }}
-  BACKEND_URLS: ${{ vars.BACKEND_URLS || 'http://127.0.0.1:5000' }}
-  BACKEND_PROXY_URL: ${{ vars.BACKEND_PROXY_URL || 'http://127.0.0.1:5000' }}
 
 jobs:
   deploy:
@@ -29,15 +25,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -70,9 +66,10 @@ jobs:
       - name: Configure SSH
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
+          VPS_PORT="${VPS_PORT:-22}"
           test -n "${VPS_HOST}"
           test -n "${VPS_SSH_KEY}"
           mkdir -p ~/.ssh
@@ -81,24 +78,85 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "${VPS_PORT}" "${VPS_HOST}" >> ~/.ssh/known_hosts
 
+      - name: Check SSH connection
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          VPS_PORT="${VPS_PORT:-22}"
+          test -n "${VPS_USER}"
+          ssh -i ~/.ssh/deploy_key \
+            -p "${VPS_PORT}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            "${VPS_USER}@${VPS_HOST}" \
+            "whoami && sudo -n true"
+
       - name: Upload release
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
+          VPS_PORT="${VPS_PORT:-22}"
           test -n "${VPS_USER}"
-          scp -i ~/.ssh/deploy_key -P "${VPS_PORT}" release.tar.gz "${VPS_USER}@${VPS_HOST}:/tmp/${APP_NAME}-release.tar.gz"
+          scp -i ~/.ssh/deploy_key \
+            -P "${VPS_PORT}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            release.tar.gz \
+            "${VPS_USER}@${VPS_HOST}:/tmp/${APP_NAME}-release.tar.gz"
 
       - name: Deploy on VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_USER: ${{ secrets.VPS_USER }}
           SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          BACKEND_URLS: ${{ vars.BACKEND_URLS }}
+          BACKEND_PROXY_URL: ${{ vars.BACKEND_PROXY_URL }}
         run: |
+          VPS_PORT="${VPS_PORT:-22}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/var/www/khrenkov-top}"
+          DOMAIN_NAME="${DOMAIN_NAME:-_}"
+          BACKEND_URLS="${BACKEND_URLS:-http://127.0.0.1:5000}"
+          BACKEND_PROXY_URL="${BACKEND_PROXY_URL:-http://127.0.0.1:5000}"
           test -n "${SITE_PASSWORD}"
           SITE_PASSWORD_B64="$(printf '%s' "${SITE_PASSWORD}" | base64 -w 0)"
-          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" \
+          ssh -i ~/.ssh/deploy_key \
+            -p "${VPS_PORT}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            "${VPS_USER}@${VPS_HOST}" \
             "APP_NAME='${APP_NAME}' DEPLOY_PATH='${DEPLOY_PATH}' DOMAIN_NAME='${DOMAIN_NAME}' BACKEND_URLS='${BACKEND_URLS}' BACKEND_PROXY_URL='${BACKEND_PROXY_URL}' SITE_PASSWORD_B64='${SITE_PASSWORD_B64}' bash -s -- '/tmp/${APP_NAME}-release.tar.gz'" \
             < .github/deploy/deploy-ubuntu.sh
+
+      - name: Verify public endpoint
+        env:
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+        run: |
+          DOMAIN_NAME="${DOMAIN_NAME:-}"
+          DOMAIN_NAME="${DOMAIN_NAME%% *}"
+
+          if [ -z "${DOMAIN_NAME}" ] || [ "${DOMAIN_NAME}" = "_" ]; then
+            echo "DOMAIN_NAME is not configured; skipping public endpoint check."
+            exit 0
+          fi
+
+          getent ahostsv4 "${DOMAIN_NAME}" || true
+
+          for attempt in {1..12}; do
+            if curl -fsS --max-time 10 "http://${DOMAIN_NAME}/" >/dev/null; then
+              echo "Public endpoint is reachable: http://${DOMAIN_NAME}/"
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "Public endpoint is not reachable: http://${DOMAIN_NAME}/" >&2
+          curl -v --max-time 15 "http://${DOMAIN_NAME}/" || true
+          exit 1

@@ -8,6 +8,42 @@ DOMAIN_NAME="${DOMAIN_NAME:-_}"
 BACKEND_URLS="${BACKEND_URLS:-http://127.0.0.1:5000}"
 BACKEND_PROXY_URL="${BACKEND_PROXY_URL:-http://127.0.0.1:5000}"
 
+join_url() {
+  local base="${1%/}"
+  local path="${2#/}"
+  printf '%s/%s' "${base}" "${path}"
+}
+
+show_backend_logs() {
+  sudo systemctl status "${SERVICE_NAME}" --no-pager || true
+  sudo journalctl -u "${SERVICE_NAME}" -n 120 --no-pager || true
+}
+
+wait_for_url() {
+  local url="${1}"
+  local label="${2}"
+  local host_header="${3:-}"
+  local attempt
+  local curl_args=(-fsS --max-time 5)
+
+  if [[ -n "${host_header}" ]]; then
+    curl_args+=(-H "Host: ${host_header}")
+  fi
+
+  for attempt in {1..20}; do
+    if curl "${curl_args[@]}" "${url}" >/dev/null 2>&1; then
+      echo "${label} is healthy: ${url}"
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  echo "Timed out waiting for ${label}: ${url}" >&2
+  curl -v --max-time 10 "${curl_args[@]}" "${url}" || true
+  return 1
+}
+
 if [[ -n "${SITE_PASSWORD_B64:-}" ]]; then
   SITE_PASSWORD="$(printf '%s' "${SITE_PASSWORD_B64}" | base64 -d)"
 else
@@ -29,6 +65,8 @@ sudo tar --no-same-owner -xzf "${PACKAGE_PATH}" -C "${RELEASE_DIR}"
 sudo rm -rf "${RELEASE_DIR}/backend/Uploads"
 sudo ln -sfn "${UPLOADS_DIR}" "${RELEASE_DIR}/backend/Uploads"
 sudo chmod +x "${RELEASE_DIR}/backend/Khrenkov.top"
+test -x "${RELEASE_DIR}/backend/Khrenkov.top"
+test -f "${RELEASE_DIR}/frontend/index.html"
 
 sudo tee "${ENV_FILE}" >/dev/null <<EOF
 ASPNETCORE_ENVIRONMENT=Production
@@ -61,11 +99,20 @@ if ! command -v nginx >/dev/null 2>&1; then
   sudo apt-get install -y nginx
 fi
 
-sudo tee "/etc/nginx/sites-available/${APP_NAME}" >/dev/null <<EOF
-server {
-    listen 80;
-    server_name ${DOMAIN_NAME};
+if ! command -v curl >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y curl
+fi
 
+SSL_DOMAIN="${DOMAIN_NAME%% *}"
+SSL_CERT="/etc/letsencrypt/live/${SSL_DOMAIN}/fullchain.pem"
+SSL_KEY="/etc/letsencrypt/live/${SSL_DOMAIN}/privkey.pem"
+SSL_OPTIONS="/etc/letsencrypt/options-ssl-nginx.conf"
+SSL_DHPARAM="/etc/letsencrypt/ssl-dhparams.pem"
+NGINX_SITE="/etc/nginx/sites-available/${APP_NAME}"
+
+write_nginx_locations() {
+  cat <<EOF
     root ${CURRENT_DIR}/frontend;
     index index.html;
 
@@ -92,8 +139,52 @@ server {
     location / {
         try_files \$uri \$uri/ /index.html;
     }
+EOF
+}
+
+if [[ "${SSL_DOMAIN}" != "_" ]] && sudo test -f "${SSL_CERT}" && sudo test -f "${SSL_KEY}"; then
+  {
+    cat <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${DOMAIN_NAME};
+
+    ssl_certificate ${SSL_CERT};
+    ssl_certificate_key ${SSL_KEY};
+EOF
+    if sudo test -f "${SSL_OPTIONS}"; then
+      echo "    include ${SSL_OPTIONS};"
+    fi
+    if sudo test -f "${SSL_DHPARAM}"; then
+      echo "    ssl_dhparam ${SSL_DHPARAM};"
+    fi
+    echo
+    write_nginx_locations
+    cat <<EOF
 }
 EOF
+  } | sudo tee "${NGINX_SITE}" >/dev/null
+else
+  {
+    cat <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+
+EOF
+    write_nginx_locations
+    cat <<EOF
+}
+EOF
+  } | sudo tee "${NGINX_SITE}" >/dev/null
+fi
 
 sudo ln -sfn "/etc/nginx/sites-available/${APP_NAME}" "/etc/nginx/sites-enabled/${APP_NAME}"
 sudo rm -f /etc/nginx/sites-enabled/default
@@ -104,8 +195,42 @@ sudo chown -R www-data:www-data "${DEPLOY_PATH}"
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_NAME}"
 sudo systemctl restart "${SERVICE_NAME}"
-sudo nginx -t
-sudo systemctl reload nginx
+if ! sudo systemctl is-active --quiet "${SERVICE_NAME}"; then
+  show_backend_logs
+  exit 1
+fi
 
-find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +6 | xargs -r sudo rm -rf
-rm -f "${PACKAGE_PATH}"
+BACKEND_HEALTH_URL="$(join_url "${BACKEND_PROXY_URL}" "/api/auth/status")"
+if ! wait_for_url "${BACKEND_HEALTH_URL}" "backend"; then
+  show_backend_logs
+  exit 1
+fi
+
+sudo nginx -t
+sudo systemctl enable --now nginx
+
+if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q '^Status: active'; then
+  sudo ufw allow 80/tcp
+  sudo ufw allow 443/tcp
+fi
+
+sudo systemctl reload nginx
+NGINX_HEALTH_HOST=""
+if [[ "${SSL_DOMAIN}" != "_" ]]; then
+  NGINX_HEALTH_HOST="${SSL_DOMAIN}"
+fi
+
+if ! wait_for_url "http://127.0.0.1/" "nginx" "${NGINX_HEALTH_HOST}"; then
+  sudo systemctl status nginx --no-pager || true
+  sudo journalctl -u nginx -n 120 --no-pager || true
+  sudo nginx -T || true
+  exit 1
+fi
+
+sudo ss -ltnp | grep -E ':(80|443|5000)\b' || true
+
+sudo find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +6 | xargs -r sudo rm -rf || \
+  echo "Warning: old release cleanup failed" >&2
+rm -f "${PACKAGE_PATH}" || echo "Warning: package cleanup failed: ${PACKAGE_PATH}" >&2
+
+echo "Deploy completed on VPS"
