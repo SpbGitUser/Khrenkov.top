@@ -118,12 +118,16 @@ jobs:
           DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
           BACKEND_URLS: ${{ vars.BACKEND_URLS }}
           BACKEND_PROXY_URL: ${{ vars.BACKEND_PROXY_URL }}
+          ENABLE_HTTPS: ${{ vars.ENABLE_HTTPS }}
+          LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
         run: |
           VPS_PORT="${VPS_PORT:-22}"
           DEPLOY_PATH="${DEPLOY_PATH:-/var/www/khrenkov-top}"
           DOMAIN_NAME="${DOMAIN_NAME:-_}"
           BACKEND_URLS="${BACKEND_URLS:-http://127.0.0.1:5000}"
           BACKEND_PROXY_URL="${BACKEND_PROXY_URL:-http://127.0.0.1:5000}"
+          ENABLE_HTTPS="${ENABLE_HTTPS:-auto}"
+          LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
           test -n "${SITE_PASSWORD}"
           SITE_PASSWORD_B64="$(printf '%s' "${SITE_PASSWORD}" | base64 -w 0)"
           ssh -i ~/.ssh/deploy_key \
@@ -131,15 +135,17 @@ jobs:
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             "${VPS_USER}@${VPS_HOST}" \
-            "APP_NAME='${APP_NAME}' DEPLOY_PATH='${DEPLOY_PATH}' DOMAIN_NAME='${DOMAIN_NAME}' BACKEND_URLS='${BACKEND_URLS}' BACKEND_PROXY_URL='${BACKEND_PROXY_URL}' SITE_PASSWORD_B64='${SITE_PASSWORD_B64}' bash -s -- '/tmp/${APP_NAME}-release.tar.gz'" \
+            "APP_NAME='${APP_NAME}' DEPLOY_PATH='${DEPLOY_PATH}' DOMAIN_NAME='${DOMAIN_NAME}' BACKEND_URLS='${BACKEND_URLS}' BACKEND_PROXY_URL='${BACKEND_PROXY_URL}' ENABLE_HTTPS='${ENABLE_HTTPS}' LETSENCRYPT_EMAIL='${LETSENCRYPT_EMAIL}' SITE_PASSWORD_B64='${SITE_PASSWORD_B64}' bash -s -- '/tmp/${APP_NAME}-release.tar.gz'" \
             < .github/deploy/deploy-ubuntu.sh
 
       - name: Verify public endpoint
         env:
           DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          ENABLE_HTTPS: ${{ vars.ENABLE_HTTPS }}
         run: |
           DOMAIN_NAME="${DOMAIN_NAME:-}"
           DOMAIN_NAME="${DOMAIN_NAME%% *}"
+          ENABLE_HTTPS="${ENABLE_HTTPS:-auto}"
 
           if [ -z "${DOMAIN_NAME}" ] || [ "${DOMAIN_NAME}" = "_" ]; then
             echo "DOMAIN_NAME is not configured; skipping public endpoint check."
@@ -148,15 +154,33 @@ jobs:
 
           getent ahostsv4 "${DOMAIN_NAME}" || true
 
+          https_required=false
+          case "${ENABLE_HTTPS}" in
+            1|true|TRUE|yes|YES|on|ON|required|REQUIRED)
+              https_required=true
+              ;;
+          esac
+
           for attempt in {1..12}; do
-            if curl -fsS --max-time 10 "http://${DOMAIN_NAME}/" >/dev/null; then
-              echo "Public endpoint is reachable: http://${DOMAIN_NAME}/"
+            if curl -fsS --max-time 10 "https://${DOMAIN_NAME}/" >/dev/null; then
+              echo "Public endpoint is reachable: https://${DOMAIN_NAME}/"
               exit 0
+            fi
+
+            if [ "${https_required}" != "true" ]; then
+              http_code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://${DOMAIN_NAME}/" || true)"
+              if [ "${http_code}" = "200" ]; then
+                echo "Public endpoint is reachable over HTTP: http://${DOMAIN_NAME}/"
+                exit 0
+              fi
             fi
 
             sleep 5
           done
 
-          echo "Public endpoint is not reachable: http://${DOMAIN_NAME}/" >&2
-          curl -v --max-time 15 "http://${DOMAIN_NAME}/" || true
+          echo "Public endpoint is not reachable over HTTPS: https://${DOMAIN_NAME}/" >&2
+          curl -v --max-time 15 "https://${DOMAIN_NAME}/" || true
+          if [ "${https_required}" != "true" ]; then
+            curl -v --max-time 15 "http://${DOMAIN_NAME}/" || true
+          fi
           exit 1

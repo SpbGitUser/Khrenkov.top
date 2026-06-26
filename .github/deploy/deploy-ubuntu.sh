@@ -7,6 +7,8 @@ DEPLOY_PATH="${DEPLOY_PATH:-/var/www/khrenkov-top}"
 DOMAIN_NAME="${DOMAIN_NAME:-_}"
 BACKEND_URLS="${BACKEND_URLS:-http://127.0.0.1:5000}"
 BACKEND_PROXY_URL="${BACKEND_PROXY_URL:-http://127.0.0.1:5000}"
+ENABLE_HTTPS="${ENABLE_HTTPS:-auto}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
 
 join_url() {
   local base="${1%/}"
@@ -41,6 +43,47 @@ wait_for_url() {
 
   echo "Timed out waiting for ${label}: ${url}" >&2
   curl -v --max-time 10 "${curl_args[@]}" "${url}" || true
+  return 1
+}
+
+ensure_apt_packages() {
+  local missing=()
+  local package
+
+  for package in "$@"; do
+    if ! dpkg -s "${package}" >/dev/null 2>&1; then
+      missing+=("${package}")
+    fi
+  done
+
+  if ((${#missing[@]} > 0)); then
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  fi
+}
+
+is_ip_address() {
+  local value="${1}"
+  [[ "${value}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "${value}" == *:* ]]
+}
+
+https_requested() {
+  case "${ENABLE_HTTPS,,}" in
+    0|false|no|off|disabled)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+https_required() {
+  case "${ENABLE_HTTPS,,}" in
+    1|true|yes|on|required)
+      return 0
+      ;;
+  esac
+
   return 1
 }
 
@@ -94,15 +137,7 @@ EnvironmentFile=${ENV_FILE}
 WantedBy=multi-user.target
 EOF
 
-if ! command -v nginx >/dev/null 2>&1; then
-  sudo apt-get update
-  sudo apt-get install -y nginx
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-  sudo apt-get update
-  sudo apt-get install -y curl
-fi
+ensure_apt_packages nginx curl ca-certificates
 
 SSL_DOMAIN="${DOMAIN_NAME%% *}"
 SSL_CERT="/etc/letsencrypt/live/${SSL_DOMAIN}/fullchain.pem"
@@ -110,6 +145,14 @@ SSL_KEY="/etc/letsencrypt/live/${SSL_DOMAIN}/privkey.pem"
 SSL_OPTIONS="/etc/letsencrypt/options-ssl-nginx.conf"
 SSL_DHPARAM="/etc/letsencrypt/ssl-dhparams.pem"
 NGINX_SITE="/etc/nginx/sites-available/${APP_NAME}"
+
+cert_available() {
+  [[ "${SSL_DOMAIN}" != "_" ]] && sudo test -f "${SSL_CERT}" && sudo test -f "${SSL_KEY}"
+}
+
+https_can_be_managed() {
+  [[ -n "${SSL_DOMAIN}" ]] && [[ "${SSL_DOMAIN}" != "_" ]] && ! is_ip_address "${SSL_DOMAIN}" && https_requested
+}
 
 write_nginx_locations() {
   cat <<EOF
@@ -142,9 +185,10 @@ write_nginx_locations() {
 EOF
 }
 
-if [[ "${SSL_DOMAIN}" != "_" ]] && sudo test -f "${SSL_CERT}" && sudo test -f "${SSL_KEY}"; then
-  {
-    cat <<EOF
+write_nginx_config() {
+  if cert_available; then
+    {
+      cat <<EOF
 server {
     listen 80;
     server_name ${DOMAIN_NAME};
@@ -159,32 +203,79 @@ server {
     ssl_certificate ${SSL_CERT};
     ssl_certificate_key ${SSL_KEY};
 EOF
-    if sudo test -f "${SSL_OPTIONS}"; then
-      echo "    include ${SSL_OPTIONS};"
-    fi
-    if sudo test -f "${SSL_DHPARAM}"; then
-      echo "    ssl_dhparam ${SSL_DHPARAM};"
-    fi
-    echo
-    write_nginx_locations
-    cat <<EOF
+      if sudo test -f "${SSL_OPTIONS}"; then
+        echo "    include ${SSL_OPTIONS};"
+      fi
+      if sudo test -f "${SSL_DHPARAM}"; then
+        echo "    ssl_dhparam ${SSL_DHPARAM};"
+      fi
+      echo
+      write_nginx_locations
+      cat <<EOF
 }
 EOF
-  } | sudo tee "${NGINX_SITE}" >/dev/null
-else
-  {
-    cat <<EOF
+    } | sudo tee "${NGINX_SITE}" >/dev/null
+  else
+    {
+      cat <<EOF
 server {
     listen 80;
     server_name ${DOMAIN_NAME};
 
 EOF
-    write_nginx_locations
-    cat <<EOF
+      write_nginx_locations
+      cat <<EOF
 }
 EOF
-  } | sudo tee "${NGINX_SITE}" >/dev/null
-fi
+    } | sudo tee "${NGINX_SITE}" >/dev/null
+  fi
+}
+
+ensure_certificate() {
+  if ! https_can_be_managed; then
+    return 0
+  fi
+
+  ensure_apt_packages certbot python3-certbot-nginx
+
+  local domain_args=()
+  local name
+  for name in ${DOMAIN_NAME}; do
+    if [[ -n "${name}" ]] && [[ "${name}" != "_" ]] && ! is_ip_address "${name}"; then
+      domain_args+=(-d "${name}")
+    fi
+  done
+
+  if ((${#domain_args[@]} == 0)); then
+    return 0
+  fi
+
+  local account_args=()
+  if [[ -n "${LETSENCRYPT_EMAIL}" ]]; then
+    account_args=(--email "${LETSENCRYPT_EMAIL}")
+  else
+    account_args=(--register-unsafely-without-email)
+  fi
+
+  if sudo certbot certonly --nginx --non-interactive --agree-tos --keep-until-expiring --cert-name "${SSL_DOMAIN}" "${account_args[@]}" "${domain_args[@]}"; then
+    return 0
+  fi
+
+  if cert_available; then
+    echo "Warning: certbot failed, but an existing certificate is present for ${SSL_DOMAIN}; keeping it." >&2
+    return 0
+  fi
+
+  if https_required; then
+    echo "HTTPS is required, but certbot could not issue a certificate for ${DOMAIN_NAME}." >&2
+    return 1
+  fi
+
+  echo "Warning: certbot could not issue a certificate for ${DOMAIN_NAME}; continuing with HTTP." >&2
+  return 0
+}
+
+write_nginx_config
 
 sudo ln -sfn "/etc/nginx/sites-available/${APP_NAME}" "/etc/nginx/sites-enabled/${APP_NAME}"
 sudo rm -f /etc/nginx/sites-enabled/default
@@ -225,6 +316,21 @@ if ! wait_for_url "http://127.0.0.1/" "nginx" "${NGINX_HEALTH_HOST}"; then
   sudo journalctl -u nginx -n 120 --no-pager || true
   sudo nginx -T || true
   exit 1
+fi
+
+if https_can_be_managed; then
+  ensure_certificate
+
+  if cert_available; then
+    write_nginx_config
+    sudo nginx -t
+    sudo systemctl reload nginx
+    curl -kfsS --max-time 10 -H "Host: ${SSL_DOMAIN}" "https://127.0.0.1/" >/dev/null || \
+      echo "Warning: local HTTPS health check failed; public verification may show more details." >&2
+  elif https_required; then
+    echo "HTTPS is required, but no certificate is available for ${SSL_DOMAIN}." >&2
+    exit 1
+  fi
 fi
 
 sudo ss -ltnp | grep -E ':(80|443|5000)\b' || true

@@ -3,7 +3,7 @@ import { HttpClient, provideHttpClient } from '@angular/common/http';
 import { Component, ElementRef, Injectable, OnInit, ViewChild, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { bootstrapApplication } from '@angular/platform-browser';
-import { finalize, Observable } from 'rxjs';
+import { finalize, Observable, timeout } from 'rxjs';
 
 interface AuthStatus {
   authenticated: boolean;
@@ -213,6 +213,7 @@ class AppComponent implements OnInit {
 
   ngOnInit(): void {
     this.api.status().pipe(
+      timeout({ first: 8000 }),
       finalize(() => {
         this.checkingStatus = false;
       })
@@ -225,6 +226,7 @@ class AppComponent implements OnInit {
       },
       error: () => {
         this.authenticated = false;
+        this.error = 'Не удалось подключиться к серверу';
       }
     });
   }
