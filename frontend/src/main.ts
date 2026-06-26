@@ -64,12 +64,7 @@ class ApiService {
   imports: [CommonModule, FormsModule],
   template: `
     <main class="shell">
-      <section *ngIf="checkingStatus" class="login-panel status-panel" aria-live="polite">
-        <p class="eyebrow">Khrenkov.top</p>
-        <h1>Проверяю доступ</h1>
-      </section>
-
-      <section *ngIf="!checkingStatus && !authenticated" class="login-panel" aria-labelledby="login-title">
+      <section *ngIf="!authenticated" class="login-panel" aria-labelledby="login-title">
         <div>
           <p class="eyebrow">Khrenkov.top</p>
           <h1 id="login-title">Вход в файловый менеджер</h1>
@@ -94,7 +89,7 @@ class ApiService {
         </form>
       </section>
 
-      <section *ngIf="!checkingStatus && authenticated" class="workspace" aria-labelledby="files-title">
+      <section *ngIf="authenticated" class="workspace" aria-labelledby="files-title">
         <header class="topbar">
           <div>
             <p class="eyebrow">Khrenkov.top</p>
@@ -190,7 +185,6 @@ class AppComponent implements OnInit {
   @ViewChild('fileInput') private fileInput?: ElementRef<HTMLInputElement>;
 
   authenticated = false;
-  checkingStatus = true;
   loggingIn = false;
   loggingOut = false;
   loadingFiles = false;
@@ -213,10 +207,7 @@ class AppComponent implements OnInit {
 
   ngOnInit(): void {
     this.api.status().pipe(
-      timeout({ first: 8000 }),
-      finalize(() => {
-        this.checkingStatus = false;
-      })
+      timeout({ first: 8000 })
     ).subscribe({
       next: status => {
         this.authenticated = status.authenticated;
@@ -226,7 +217,8 @@ class AppComponent implements OnInit {
       },
       error: () => {
         this.authenticated = false;
-        this.error = 'Не удалось подключиться к серверу';
+        this.password = '';
+        this.resetWorkspaceState();
       }
     });
   }
@@ -240,6 +232,7 @@ class AppComponent implements OnInit {
     this.clearFeedback();
     this.loggingIn = true;
     this.api.login(password).pipe(
+      timeout({ first: 10000 }),
       finalize(() => {
         this.loggingIn = false;
       })
@@ -251,7 +244,8 @@ class AppComponent implements OnInit {
         this.loadFiles();
       },
       error: () => {
-        this.error = 'Неверный пароль';
+        this.password = '';
+        this.error = 'Не удалось войти. Введите пароль заново';
       }
     });
   }
