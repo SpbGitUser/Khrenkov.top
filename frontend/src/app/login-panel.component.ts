@@ -11,7 +11,7 @@ import { FormsModule } from '@angular/forms';
     <section class="login-panel view-enter" aria-labelledby="login-title">
       <div>
         <p class="eyebrow">Khrenkov.top</p>
-        <h1 id="login-title">Вход в файловый менеджер</h1>
+        <h1 id="login-title">Вход в окружение</h1>
       </div>
 
       <form class="login-form" (ngSubmit)="submit()">
