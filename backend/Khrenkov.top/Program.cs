@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Khrenkov.top.Services;
 using Microsoft.AspNetCore.HttpOverrides;
+using Khrenkov.top.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,6 +14,8 @@ builder.Services.AddSwaggerGen(c =>
     c.SwaggerDoc("v1", new() { Title = "Khrenkov.top API", Version = "v1" });
 });
 
+builder.Services.AddSingleton<ApplicationDatabase>();
+builder.Services.AddSingleton<FileCatalogService>();
 builder.Services.AddSingleton<ShareLinkService>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -49,6 +52,10 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     });
 
 var app = builder.Build();
+
+// Apply schema and data migrations before accepting requests, including after deployment.
+app.Services.GetRequiredService<ApplicationDatabase>().Migrate();
+app.Services.GetRequiredService<FileCatalogService>().SynchronizeWithDisk();
 
 app.UseForwardedHeaders();
 

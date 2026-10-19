@@ -12,33 +12,20 @@ namespace Khrenkov.top.Controllers.Api
     {
         private readonly string _uploadsPath;
         private readonly ShareLinkService _shareService;
+        private readonly FileCatalogService _catalog;
 
-        public FilesApiController(IWebHostEnvironment env, ShareLinkService shareService)
+        public FilesApiController(IWebHostEnvironment env, ShareLinkService shareService, FileCatalogService catalog)
         {
             _uploadsPath = Path.Combine(env.ContentRootPath, "Uploads");
             _shareService = shareService;
+            _catalog = catalog;
             Directory.CreateDirectory(_uploadsPath);
         }
 
         [HttpGet]
         public IActionResult List()
         {
-            var files = Directory.GetFiles(_uploadsPath)
-                .Where(f => Path.GetFileName(f) != "_shares.json")
-                .Select(f =>
-                {
-                    var info = new FileInfo(f);
-                    return new
-                    {
-                        name = info.Name,
-                        size = info.Length,
-                        modified = info.LastWriteTimeUtc
-                    };
-                })
-                .OrderBy(f => f.name)
-                .ToList();
-
-            return Ok(files);
+            return Ok(_catalog.List());
         }
 
         [HttpPost("upload")]
@@ -49,17 +36,33 @@ namespace Khrenkov.top.Controllers.Api
                 return BadRequest(new { error = "Файл не выбран или пустой" });
 
             var fileName = Path.GetFileName(file.FileName);
-            var destPath = Path.Combine(_uploadsPath, fileName);
-            await using var stream = System.IO.File.Create(destPath);
-            await file.CopyToAsync(stream);
-
-            return Ok(new { name = fileName, size = file.Length, modified = DateTime.UtcNow });
+            if (!FileCatalogService.IsUserFileName(fileName))
+                return BadRequest(new { error = "Недопустимое имя файла" });
+            // A unique directory avoids reserving a name previously available to user files.
+            var stagingPath = Path.Combine(_uploadsPath, $".upload-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(stagingPath);
+            var temporaryPath = Path.Combine(stagingPath, Guid.NewGuid().ToString("N"));
+            try
+            {
+                await using (var stream = System.IO.File.Create(temporaryPath))
+                    await file.CopyToAsync(stream, HttpContext.RequestAborted);
+                return Ok(await _catalog.CompleteUploadAsync(temporaryPath, fileName, HttpContext.RequestAborted));
+            }
+            finally
+            {
+                if (System.IO.File.Exists(temporaryPath))
+                    System.IO.File.Delete(temporaryPath);
+                Directory.Delete(stagingPath);
+            }
         }
 
         [HttpGet("download/{fileName}")]
         public IActionResult Download(string fileName)
         {
-            var filePath = Path.Combine(_uploadsPath, Path.GetFileName(fileName));
+            var actualFileName = _catalog.ResolveExistingFileName(fileName);
+            if (actualFileName is null)
+                return NotFound(new { error = "Файл не найден" });
+            var filePath = Path.Combine(_uploadsPath, actualFileName);
             if (!System.IO.File.Exists(filePath))
                 return NotFound(new { error = "Файл не найден" });
 
@@ -67,13 +70,13 @@ namespace Khrenkov.top.Controllers.Api
         }
 
         [HttpDelete("{fileName}")]
-        public IActionResult Delete(string fileName)
+        public async Task<IActionResult> Delete(string fileName)
         {
-            var filePath = Path.Combine(_uploadsPath, Path.GetFileName(fileName));
-            if (!System.IO.File.Exists(filePath))
+            if (!FileCatalogService.IsUserFileName(fileName))
+                return NotFound(new { error = "Файл не найден" });
+            if (!await _catalog.DeleteFileAsync(fileName, HttpContext.RequestAborted))
                 return NotFound(new { error = "Файл не найден" });
 
-            System.IO.File.Delete(filePath);
             return NoContent();
         }
 
@@ -83,13 +86,22 @@ namespace Khrenkov.top.Controllers.Api
             if (string.IsNullOrWhiteSpace(request.FileName) || request.MaxDownloads < 1)
                 return BadRequest(new { error = "Некорректные параметры" });
 
-            var fileName = Path.GetFileName(request.FileName);
+            var fileName = _catalog.ResolveExistingFileName(Path.GetFileName(request.FileName));
+            if (fileName is null)
+                return NotFound(new { error = "Файл не найден" });
             var filePath = Path.Combine(_uploadsPath, fileName);
             if (!System.IO.File.Exists(filePath))
                 return NotFound(new { error = "Файл не найден" });
 
-            var link = _shareService.CreateLink(fileName, request.MaxDownloads);
-            return Ok(new { token = link.Token });
+            try
+            {
+                var link = _shareService.CreateLink(fileName, request.MaxDownloads);
+                return Ok(new { token = link.Token });
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound(new { error = "Файл не найден" });
+            }
         }
     }
 

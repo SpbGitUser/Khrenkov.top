@@ -101,8 +101,10 @@ RELEASE_DIR="${RELEASES_DIR}/${RELEASE_ID}"
 CURRENT_DIR="${DEPLOY_PATH}/current"
 SHARED_DIR="${DEPLOY_PATH}/shared"
 UPLOADS_DIR="${SHARED_DIR}/Uploads"
+DATA_DIR="${SHARED_DIR}/Data"
 
-sudo mkdir -p "${RELEASE_DIR}" "${UPLOADS_DIR}"
+sudo mkdir -p "${RELEASE_DIR}" "${UPLOADS_DIR}" "${DATA_DIR}"
+sudo chmod 700 "${DATA_DIR}"
 sudo tar --no-same-owner -xzf "${PACKAGE_PATH}" -C "${RELEASE_DIR}"
 
 sudo rm -rf "${RELEASE_DIR}/backend/Uploads"
@@ -115,6 +117,7 @@ sudo tee "${ENV_FILE}" >/dev/null <<EOF
 ASPNETCORE_ENVIRONMENT=Production
 ASPNETCORE_URLS=${BACKEND_URLS}
 SitePassword=${SITE_PASSWORD}
+Database__Path="${DATA_DIR}/application.db"
 EOF
 sudo chmod 600 "${ENV_FILE}"
 

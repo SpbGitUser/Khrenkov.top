@@ -1,71 +1,52 @@
-using System.Text.Json;
+using System.Globalization;
+using Khrenkov.top.Data;
 using Khrenkov.top.Models;
 
 namespace Khrenkov.top.Services
 {
-    public class ShareLinkService
+    public sealed class ShareLinkService(ApplicationDatabase database)
     {
-        private readonly string _storePath;
-        private List<ShareLink> _links = new();
-        private readonly object _lock = new();
-
-        public ShareLinkService(IWebHostEnvironment env)
-        {
-            _storePath = Path.Combine(env.ContentRootPath, "Uploads", "_shares.json");
-            Load();
-        }
-
-        private void Load()
-        {
-            if (File.Exists(_storePath))
-            {
-                try
-                {
-                    var json = File.ReadAllText(_storePath);
-                    _links = JsonSerializer.Deserialize<List<ShareLink>>(json) ?? new();
-                }
-                catch
-                {
-                    _links = new();
-                }
-            }
-        }
-
-        private void Save()
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(_storePath)!);
-            File.WriteAllText(_storePath, JsonSerializer.Serialize(_links));
-        }
-
         public ShareLink CreateLink(string fileName, int maxDownloads)
         {
-            lock (_lock)
-            {
-                var link = new ShareLink { FileName = fileName, RemainingDownloads = maxDownloads };
-                _links.Add(link);
-                Save();
-                return link;
-            }
+            ArgumentOutOfRangeException.ThrowIfLessThan(maxDownloads, 1);
+            var link = new ShareLink { FileName = fileName, RemainingDownloads = maxDownloads };
+            using var connection = database.OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO ShareLinks (Token, FileId, RemainingDownloads, CreatedAtUtc)
+                SELECT $token, Id, $remaining, $created FROM Files WHERE Name = $fileName;
+                """;
+            command.Parameters.AddWithValue("$token", link.Token);
+            command.Parameters.AddWithValue("$fileName", fileName);
+            command.Parameters.AddWithValue("$remaining", maxDownloads);
+            command.Parameters.AddWithValue("$created", link.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+            if (command.ExecuteNonQuery() != 1)
+                throw new FileNotFoundException("File metadata was not found in the database.", fileName);
+            return link;
         }
 
         public (bool Success, string? FileName) TryConsume(string token)
         {
-            lock (_lock)
-            {
-                var link = _links.FirstOrDefault(l => l.Token == token);
-                if (link == null || link.RemainingDownloads <= 0)
-                    return (false, null);
-                link.RemainingDownloads--;
-                if (link.RemainingDownloads == 0)
-                    _links.Remove(link);
-                Save();
-                return (true, link.FileName);
-            }
-        }
+            using var connection = database.OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT f.Name FROM ShareLinks AS s JOIN Files AS f ON f.Id = s.FileId
+                WHERE s.Token = $token AND s.RemainingDownloads > 0;
+                """;
+            command.Parameters.AddWithValue("$token", token);
+            var fileName = command.ExecuteScalar() as string;
+            if (fileName is null || !File.Exists(Path.Combine(database.UploadsPath, fileName)))
+                return (false, null);
 
-        public List<ShareLink> GetAll()
-        {
-            lock (_lock) return _links.ToList();
+            command.CommandText = "UPDATE ShareLinks SET RemainingDownloads = RemainingDownloads - 1 WHERE Token = $token AND RemainingDownloads > 0";
+            if (command.ExecuteNonQuery() != 1)
+                return (false, null);
+            command.CommandText = "DELETE FROM ShareLinks WHERE Token = $token AND RemainingDownloads = 0";
+            command.ExecuteNonQuery();
+            transaction.Commit();
+            return (true, fileName);
         }
     }
 }

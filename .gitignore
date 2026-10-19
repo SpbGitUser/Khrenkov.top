@@ -7,3 +7,7 @@ frontend/node_modules/
 frontend/dist/
 .angular/
 .tmp/
+
+# Application runtime database, including SQLite WAL/SHM/journal files.
+backend/Khrenkov.top/Data/*.db
+backend/Khrenkov.top/Data/*.db-*
