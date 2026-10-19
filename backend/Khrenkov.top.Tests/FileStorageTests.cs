@@ -1,7 +1,14 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Data.Common;
+using Khrenkov.top.Controllers.Api;
+using Khrenkov.top.Data;
 using Khrenkov.top.Services;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -9,6 +16,50 @@ namespace Khrenkov.top.Tests;
 
 public sealed class FileStorageTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Request_cancellation_after_filesystem_mutation_cannot_skip_metadata_finalization(bool upload)
+    {
+        using var site = new TestSite();
+        site.WriteFile("cancel.txt", "old");
+        site.WriteLegacyLinks("""
+            [{"Token":"cancel-link","FileName":"cancel.txt","RemainingDownloads":2,"CreatedAt":"2025-01-01T00:00:00Z"}]
+            """);
+        using var app = site.Start();
+        using var client = app.CreateClient();
+        using var cancellation = new CancellationTokenSource();
+        await using var database = new ApplicationDbContext(new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseSqlite(new SqliteConnectionStringBuilder { DataSource = site.DatabasePath, ForeignKeys = true }.ToString())
+            .AddInterceptors(new CancelWhenDatabaseIsOpened(cancellation)).Options);
+        var controller = new FilesApiController(database, app.Services.GetRequiredService<FileStorage>())
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext { RequestAborted = cancellation.Token } }
+        };
+
+        if (upload)
+        {
+            await using var content = new MemoryStream("replacement"u8.ToArray());
+            var file = new FormFile(content, 0, content.Length, "file", "cancel.txt");
+            Assert.IsType<OkObjectResult>(await controller.Upload(file));
+        }
+        else
+            Assert.IsType<NoContentResult>(await controller.Delete("cancel.txt"));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        await using var query = site.CreateContext();
+        if (upload)
+        {
+            Assert.Equal(11, (await query.Files.SingleAsync()).Size);
+            Assert.Single(await query.ShareLinks.ToListAsync());
+        }
+        else
+        {
+            Assert.Empty(await query.Files.ToListAsync());
+            Assert.Empty(await query.ShareLinks.ToListAsync());
+        }
+    }
+
     [Fact]
     public async Task Existing_file_named_staging_does_not_block_new_uploads()
     {
@@ -193,11 +244,9 @@ public sealed class FileStorageTests
             """);
         using var app = site.Start();
         using var client = app.CreateClient();
-        var service = app.Services.GetRequiredService<ShareLinkService>();
+        var results = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Task.Run(() => client.GetStringAsync("/share/one-link"))));
 
-        var results = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Task.Run(() => service.TryConsume("one-link"))));
-
-        Assert.Single(results, result => result.Success);
+        Assert.Single(results, result => result == "one");
         using var connection = site.OpenDatabase();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COALESCE(SUM(RemainingDownloads), 0) FROM ShareLinks";
@@ -265,6 +314,16 @@ public sealed class FileStorageTests
 
     private sealed record FileResponse(string Name, long Size, DateTime Modified);
     private sealed record ShareResponse(string Token);
+
+    private sealed class CancelWhenDatabaseIsOpened(CancellationTokenSource source) : DbConnectionInterceptor
+    {
+        public override ValueTask<InterceptionResult> ConnectionOpeningAsync(DbConnection connection, ConnectionEventData eventData,
+            InterceptionResult result, CancellationToken cancellationToken = default)
+        {
+            source.Cancel();
+            return ValueTask.FromResult(result);
+        }
+    }
 
     private static async Task WaitUntil(Func<bool> condition)
     {

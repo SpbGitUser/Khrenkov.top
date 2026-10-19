@@ -1,8 +1,11 @@
 using System.Net.Http.Json;
+using Khrenkov.top.Data;
 using Khrenkov.top.Controllers.Api;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Configuration;
 using Xunit;
 
@@ -106,8 +109,7 @@ public sealed class DatabaseMigrationTests
         using var site = new TestSite();
         site.WriteFile("old.txt", "old content");
         site.WriteLegacyLinks("{broken");
-        using (var app = site.Start())
-            Assert.ThrowsAny<Exception>(() => app.CreateClient());
+        Assert.ThrowsAny<Exception>(() => site.Migrate());
 
         using (var connection = site.OpenDatabase())
         using (var command = connection.CreateCommand())
@@ -165,7 +167,7 @@ public sealed class DatabaseMigrationTests
     public void Database_inside_downloadable_uploads_is_rejected()
     {
         using var site = new TestSite();
-        using var app = site.Start(Path.Combine(site.UploadsPath, "private.db"));
+        using var app = site.Start(Path.Combine(site.UploadsPath, "private.db"), migrate: false);
         Assert.ThrowsAny<Exception>(() => app.CreateClient());
         Assert.False(File.Exists(Path.Combine(site.UploadsPath, "private.db")));
     }
@@ -181,8 +183,20 @@ internal sealed class TestSite : IDisposable
     public void WriteFile(string name, string content) => File.WriteAllText(Path.Combine(UploadsPath, name), content);
     public void WriteLegacyLinks(string json) => File.WriteAllText(Path.Combine(UploadsPath, "_shares.json"), json);
 
-    public WebApplicationFactory<FilesApiController> Start(string? databasePath = null) =>
-        new WebApplicationFactory<FilesApiController>().WithWebHostBuilder(builder =>
+    public ApplicationDbContext CreateContext() => new(new DbContextOptionsBuilder<ApplicationDbContext>()
+        .UseSqlite(new SqliteConnectionStringBuilder { DataSource = DatabasePath, ForeignKeys = true, DefaultTimeout = 30 }.ToString()).Options);
+
+    public void Migrate()
+    {
+        using var database = CreateContext();
+        new DatabaseMigrator(database, NullLogger<DatabaseMigrator>.Instance).ApplyAsync(UploadsPath).GetAwaiter().GetResult();
+    }
+
+    public WebApplicationFactory<FilesApiController> Start(string? databasePath = null, bool migrate = true)
+    {
+        if (migrate)
+            Migrate();
+        return new WebApplicationFactory<FilesApiController>().WithWebHostBuilder(builder =>
         {
             builder.UseContentRoot(RootPath);
             builder.UseEnvironment("Testing");
@@ -192,6 +206,7 @@ internal sealed class TestSite : IDisposable
                 ["SitePassword"] = "integration-test-password"
             }));
         });
+    }
 
     public SqliteConnection OpenDatabase()
     {

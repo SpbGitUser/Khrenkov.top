@@ -13,6 +13,7 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["Khrenkov.top/Khrenkov.top.csproj", "Khrenkov.top/"]
+COPY ["Khrenkov.top.Data/Khrenkov.top.Data.csproj", "Khrenkov.top.Data/"]
 RUN dotnet restore "./Khrenkov.top/Khrenkov.top.csproj"
 COPY . .
 WORKDIR "/src/Khrenkov.top"

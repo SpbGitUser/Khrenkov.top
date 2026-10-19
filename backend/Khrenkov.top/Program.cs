@@ -2,8 +2,20 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Khrenkov.top.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Khrenkov.top.Data;
+using Microsoft.EntityFrameworkCore;
 
-var builder = WebApplication.CreateBuilder(args);
+DatabaseCommand? databaseCommand;
+try
+{
+    databaseCommand = DatabaseCommand.Parse(args);
+}
+catch (ArgumentException exception)
+{
+    Console.Error.WriteLine(exception.Message);
+    Environment.ExitCode = 2;
+    return;
+}
+var builder = WebApplication.CreateBuilder(databaseCommand?.ConfigurationArguments ?? args);
 
 // Add services to the container.
 builder.Services.AddControllers();
@@ -14,9 +26,11 @@ builder.Services.AddSwaggerGen(c =>
     c.SwaggerDoc("v1", new() { Title = "Khrenkov.top API", Version = "v1" });
 });
 
-builder.Services.AddSingleton<ApplicationDatabase>();
-builder.Services.AddSingleton<FileCatalogService>();
-builder.Services.AddSingleton<ShareLinkService>();
+builder.Services.AddSingleton<StoragePaths>();
+builder.Services.AddSingleton<FileStorage>();
+builder.Services.AddDbContext<ApplicationDbContext>((services, options) =>
+    options.UseSqlite(services.GetRequiredService<StoragePaths>().ConnectionString));
+builder.Services.AddScoped<DatabaseMigrator>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -51,11 +65,34 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         };
     });
 
-var app = builder.Build();
+await using var app = builder.Build();
 
-// Apply schema and data migrations before accepting requests, including after deployment.
-app.Services.GetRequiredService<ApplicationDatabase>().Migrate();
-app.Services.GetRequiredService<FileCatalogService>().SynchronizeWithDisk();
+await using (var scope = app.Services.CreateAsyncScope())
+{
+    var migrator = scope.ServiceProvider.GetRequiredService<DatabaseMigrator>();
+    var paths = scope.ServiceProvider.GetRequiredService<StoragePaths>();
+    if (databaseCommand is not null)
+    {
+        try
+        {
+            switch (databaseCommand.Action)
+            {
+                case "migrate": await migrator.ApplyAsync(paths.UploadsPath); break;
+                case "rollback": await migrator.RollbackAsync(databaseCommand.Target!); break;
+                case "status": Console.WriteLine(await migrator.StatusAsync()); break;
+            }
+        }
+        catch (Exception exception)
+        {
+            app.Logger.LogError(exception, "Database command failed");
+            Environment.ExitCode = 1;
+        }
+        return;
+    }
+    await migrator.RequireCurrentAsync();
+    Directory.CreateDirectory(paths.UploadsPath);
+    await FileCatalogSynchronization.ApplyAsync(scope.ServiceProvider.GetRequiredService<ApplicationDbContext>(), paths.UploadsPath);
+}
 
 app.UseForwardedHeaders();
 
@@ -84,4 +121,4 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-app.Run();
+await app.RunAsync();

@@ -283,12 +283,20 @@ write_nginx_config
 sudo ln -sfn "/etc/nginx/sites-available/${APP_NAME}" "/etc/nginx/sites-enabled/${APP_NAME}"
 sudo rm -f /etc/nginx/sites-enabled/default
 
-sudo ln -sfn "${RELEASE_DIR}" "${CURRENT_DIR}"
 sudo chown -R www-data:www-data "${DEPLOY_PATH}"
 
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_NAME}"
-sudo systemctl restart "${SERVICE_NAME}"
+sudo systemctl stop "${SERVICE_NAME}"
+# Run schema migration/import separately from HTTP, under the same identity/configuration.
+# On failure the service stays stopped and the current symlink still points to the old release.
+sudo systemd-run --wait --pipe --collect \
+  --property="User=www-data" \
+  --property="WorkingDirectory=${RELEASE_DIR}/backend" \
+  --property="EnvironmentFile=${ENV_FILE}" \
+  "${RELEASE_DIR}/backend/Khrenkov.top" database migrate
+sudo ln -sfn "${RELEASE_DIR}" "${CURRENT_DIR}"
+sudo systemctl start "${SERVICE_NAME}"
 if ! sudo systemctl is-active --quiet "${SERVICE_NAME}"; then
   show_backend_logs
   exit 1

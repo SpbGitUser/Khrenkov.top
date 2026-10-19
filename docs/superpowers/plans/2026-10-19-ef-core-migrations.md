@@ -1,0 +1,19 @@
+# EF Core and explicit migration commands
+
+**Goal:** Fulfil the owner's request to use DbContext/DbSet entities instead of SQL-query services, and provide rollback separately from applying migrations. No commits or live deployment.
+
+**Design:** A separate `backend/Khrenkov.top.Data` class library owns ApplicationDbContext, entities, EF migrations/snapshot and import infrastructure (owner's follow-up requirement). ApplicationDbContext owns Files, ShareLinks and DataMigrations (mapped to the existing SchemaMigrations import ledger). Controllers use the scoped context directly. FileStorage only coordinates filesystem operations and never queries the database. InitialSchema is a normal EF migration with Up/Down and a model snapshot. A compatibility step adopts the existing hand-written schema into EF history without reimporting data or changing identities/tokens. The existing file/JSON import becomes a transactional DbContext operation, tracked by its existing version-2 marker. It is a data import, not a filesystem-dependent EF schema migration.
+
+**Commands:** `database migrate` upgrades schema then completes the one-time import; `database rollback --to <migration|0>` only moves backwards using EF IMigrator, and never imports or deletes uploaded files. `database status` reports applied/pending migrations. Commands use normal application configuration and terminate without starting HTTP. Normal startup validates migration/import completion and reconciles disk metadata; it cannot reverse a manual rollback. Rollback to 0 drops application tables and all metadata/links; users must take a backup before doing so. Future migrations have their own Up/Down.
+
+**Compatibility:** Keep net8.0 and SQLite; preserve API contracts, UTC formats, private database path, cascade deletion, Windows/Linux filename semantics, serialized upload/delete, and atomic share consumption. Existing SchemaMigrations version 1 or 2 can be adopted; unknown/inconsistent schemas must be rejected. Never run rollback against the user's database during development.
+
+- [x] Add failing lifecycle tests: normal startup cannot migrate, explicit migrate exits without HTTP, rollback and reapply work, and invalid direction/target leave data unchanged.
+- [x] Add matching EF Core SQLite/Design packages and a local dotnet-ef tool manifest; create entities, DbContext configuration, generated migration and snapshot.
+- [x] Replace the manual runner/import with EF schema migration commands, narrowly scoped legacy adoption, and transactional entity import. Test existing DB adoption without restoring consumed tokens.
+- [x] Replace SQL services with direct controller DbContext usage and a filesystem-only helper; retain and adapt existing HTTP/concurrency tests.
+- [x] Change deploy to stop the service, run migrate as www-data with the configured environment/content root, then start the application. Provide a separate rollback script that stops the app and leaves it stopped.
+- [x] Update local/deploy docs with commands, data-loss boundaries, legacy adoption, and how to scaffold future migrations.
+- [x] Run the full Release suite, verify model/snapshot agreement, linux-x64 publish excluding runtime data, shell syntax, focused review, and final diff checks. No commit or VPS changes.
+
+Verified: 34 Release integration tests passed, including two cancellation regressions reproduced before the fix. Focused read-only review confirmed the fix. EF model matches the snapshot. Self-contained linux-x64 publication includes the Data assembly and native SQLite and excludes runtime data. Both deploy scripts passed bash -n. Adoption of a temporary backup of the local database preserved every Files/ShareLinks/SchemaMigrations row; integrity_check and foreign_key_check passed. The original runtime database was not migrated. No Docker build or live VPS execution was performed. No commit was created.

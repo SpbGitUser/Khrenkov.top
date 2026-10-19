@@ -7,12 +7,18 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Khrenkov.top", "Khrenkov.to
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Khrenkov.top.Tests", "Khrenkov.top.Tests\Khrenkov.top.Tests.csproj", "{511D93E4-B230-49FD-8EC6-8300F256E7D6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Khrenkov.top.Data", "Khrenkov.top.Data\Khrenkov.top.Data.csproj", "{D1411199-C68E-4D05-BB41-268F269BE43F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D1411199-C68E-4D05-BB41-268F269BE43F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D1411199-C68E-4D05-BB41-268F269BE43F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D1411199-C68E-4D05-BB41-268F269BE43F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D1411199-C68E-4D05-BB41-268F269BE43F}.Release|Any CPU.Build.0 = Release|Any CPU
 		{7453638E-7AD1-4E5E-AC5F-95D19F21DBB1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{7453638E-7AD1-4E5E-AC5F-95D19F21DBB1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7453638E-7AD1-4E5E-AC5F-95D19F21DBB1}.Release|Any CPU.ActiveCfg = Release|Any CPU
